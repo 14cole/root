@@ -1,0 +1,165 @@
+{
+  "report_type": "2dsolver_repro_check",
+  "generated_utc": "2026-04-08T04:06:38.404136+00:00",
+  "host": "Emerys-MacBook-Air.local",
+  "cwd": "/Users/emery/Documents/Plot_Cut",
+  "inputs": {
+    "geometry_path": "/Users/emery/Documents/Plot_Cut/2dsolver/airfoil_symmetric.geo",
+    "units": "meters",
+    "polarization": "TM",
+    "frequencies_ghz": [
+      2.0,
+      4.0
+    ],
+    "elevations_deg": [
+      0.0,
+      90.0
+    ]
+  },
+  "environment": {
+    "python_version": "3.14.3 (v3.14.3:323c59a5e34, Feb  3 2026, 11:41:37) [Clang 16.0.0 (clang-1600.0.26.6)]",
+    "python_executable": "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3",
+    "platform": "macOS-26.4-arm64-arm-64bit-Mach-O",
+    "numpy_version": "2.4.4",
+    "scipy_version": "1.17.1",
+    "mpmath_version": "1.4.1"
+  },
+  "files": {
+    "geometry": {
+      "path": "/Users/emery/Documents/Plot_Cut/2dsolver/airfoil_symmetric.geo",
+      "exists": true,
+      "sha256": "93b4ff6195bcf2152ea81c15489ed4c743c8b218d38eb77c0133ec05d7dc4a20",
+      "bytes": 4883
+    },
+    "material_files": [],
+    "code_hashes": {
+      "rcs_solver.py": {
+        "path": "/Users/emery/Documents/Plot_Cut/2dsolver/rcs_solver.py",
+        "exists": true,
+        "sha256": "b65de6c6f7a169ad797303a8447f4cdbe64eede4707742ac54416651b808d410",
+        "bytes": 84461
+      },
+      "headless_solver.py": {
+        "path": "/Users/emery/Documents/Plot_Cut/2dsolver/headless_solver.py",
+        "exists": true,
+        "sha256": "eb552bcdda18df0a9843bbe942428230f7b4da169992774a31e512bb60c748e1",
+        "bytes": 22109
+      },
+      "geometry_io.py": {
+        "path": "/Users/emery/Documents/Plot_Cut/2dsolver/geometry_io.py",
+        "exists": true,
+        "sha256": "82d37879645a9ba3ef76e5269fe95a837985f130c2647d21f818f9e24849e364",
+        "bytes": 5386
+      },
+      "grim_io.py": {
+        "path": "/Users/emery/Documents/Plot_Cut/2dsolver/grim_io.py",
+        "exists": true,
+        "sha256": "6e88058e3b0a8ec4c5698424d9882ad64bd2997f846acbfbb8fea8d2857ce923",
+        "bytes": 5487
+      },
+      "solver_quality.py": {
+        "path": "/Users/emery/Documents/Plot_Cut/2dsolver/solver_quality.py",
+        "exists": true,
+        "sha256": "54e1b4242e29753a96cd1fa08e204856c5e12971ec05adb6cc986dead5ae8b90",
+        "bytes": 4836
+      },
+      "solver_tab.py": {
+        "path": "/Users/emery/Documents/Plot_Cut/2dsolver/solver_tab.py",
+        "exists": true,
+        "sha256": "b0bc1536b5a49b1655415927c2dfd9a297476e62b37745f11d2e9c6f8528ffd0",
+        "bytes": 34478
+      },
+      "main.py": {
+        "path": "/Users/emery/Documents/Plot_Cut/2dsolver/main.py",
+        "exists": true,
+        "sha256": "1a6b9cf886e9299932db3786395fee3c4d6d34ff60e5068ce0fd345b7f968551",
+        "bytes": 1416
+      }
+    }
+  },
+  "probe": {
+    "metadata": {
+      "formulation": "2D BIE/MoM pulse-point EFIE/MFIE",
+      "coupled_dielectric_mode": false,
+      "geometry_units_in": "meters",
+      "panel_count": 120,
+      "panel_length_min_m": 0.008088695877581285,
+      "panel_length_max_m": 0.30777670685904746,
+      "frequency_count": 2,
+      "elevation_count": 2,
+      "max_panels_limit": 20000,
+      "bessel_backend": "libm",
+      "complex_hankel_backend": "scipy-special",
+      "junction_nodes": 0,
+      "junction_constraints": 0,
+      "junction_panels": 0,
+      "junction_trace_constraints": 0,
+      "junction_flux_constraints": 0,
+      "residual_norm_max": 1.1535421773721166e-15,
+      "residual_norm_mean": 9.844513470912064e-16,
+      "condition_est_computed": true,
+      "condition_est_count": 2,
+      "condition_est_max": 187.2781250914438,
+      "condition_est_mean": 109.50964985177531,
+      "reuse_angle_invariant_matrix": true,
+      "matrix_reuse_solve_count": 4,
+      "parallel_elevations_enabled": true,
+      "parallel_elevation_solve_count": 4,
+      "parallel_elevation_workers_used": 2,
+      "cfie_eps_min": 0.005,
+      "cfie_eps_max": 0.005,
+      "cfie_eps_mean": 0.005,
+      "warnings": [],
+      "quality_gate": {
+        "passed": true,
+        "thresholds": {
+          "residual_norm_max": 0.01,
+          "condition_est_max": 1000000.0,
+          "warnings_max": 10
+        },
+        "values": {
+          "residual_norm_max": 1.1535421773721166e-15,
+          "condition_est_max": 187.2781250914438,
+          "condition_est_computed": true,
+          "warnings_count": 0
+        },
+        "violations": []
+      }
+    },
+    "sample_signature": {
+      "sample_count": 4,
+      "signature_sha256": "deacb4bcf49192ea9dcce6d97a4ff2e5b82186ee1b69d086cbdc8c9d45af71a7",
+      "rows": [
+        {
+          "frequency_ghz": 2.0,
+          "theta_scat_deg": 0.0,
+          "rcs_db": 43.982330057,
+          "rcs_amp_phase_deg": -136.1129991176
+        },
+        {
+          "frequency_ghz": 2.0,
+          "theta_scat_deg": 90.0,
+          "rcs_db": 47.0042945048,
+          "rcs_amp_phase_deg": 147.0629947596
+        },
+        {
+          "frequency_ghz": 4.0,
+          "theta_scat_deg": 0.0,
+          "rcs_db": 47.5507832826,
+          "rcs_amp_phase_deg": -1.8449719668
+        },
+        {
+          "frequency_ghz": 4.0,
+          "theta_scat_deg": 90.0,
+          "rcs_db": 35.5954717149,
+          "rcs_amp_phase_deg": -116.6042760659
+        }
+      ]
+    },
+    "sample_stats": {
+      "rcs_db_min": 35.595471714897684,
+      "rcs_db_max": 47.55078328261711,
+      "rcs_db_mean": 43.53321988982572
+    }
+  }
+}

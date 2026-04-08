@@ -246,8 +246,10 @@ class _BesselBackend:
     """
     Real-argument Bessel backend.
 
-    Fast path: libc/libm j0/y0/j1/y1.
-    Fallback: local series/asymptotic approximations.
+    Backend preference:
+    1) libc/libm j0/y0/j1/y1
+    2) scipy.special j0/y0/j1/y1
+    3) local series/asymptotic approximations
     """
 
     def __init__(self):
@@ -256,54 +258,79 @@ class _BesselBackend:
         self._y0 = None
         self._j1 = None
         self._y1 = None
+        self._backend_name = "series-fallback"
 
         libname = ctypes.util.find_library("m")
-        if not libname:
-            return
-        try:
-            lib = ctypes.CDLL(libname)
-            self._j0 = lib.j0
-            self._j0.argtypes = [ctypes.c_double]
-            self._j0.restype = ctypes.c_double
-            self._y0 = lib.y0
-            self._y0.argtypes = [ctypes.c_double]
-            self._y0.restype = ctypes.c_double
-            self._j1 = lib.j1
-            self._j1.argtypes = [ctypes.c_double]
-            self._j1.restype = ctypes.c_double
-            self._y1 = lib.y1
-            self._y1.argtypes = [ctypes.c_double]
-            self._y1.restype = ctypes.c_double
-            self._lib = lib
-        except Exception:
-            self._lib = None
-            self._j0 = None
-            self._y0 = None
-            self._j1 = None
-            self._y1 = None
+        if libname:
+            try:
+                lib = ctypes.CDLL(libname)
+                self._j0 = lib.j0
+                self._j0.argtypes = [ctypes.c_double]
+                self._j0.restype = ctypes.c_double
+                self._y0 = lib.y0
+                self._y0.argtypes = [ctypes.c_double]
+                self._y0.restype = ctypes.c_double
+                self._j1 = lib.j1
+                self._j1.argtypes = [ctypes.c_double]
+                self._j1.restype = ctypes.c_double
+                self._y1 = lib.y1
+                self._y1.argtypes = [ctypes.c_double]
+                self._y1.restype = ctypes.c_double
+                self._lib = lib
+                self._backend_name = "libm"
+                return
+            except Exception:
+                self._lib = None
+                self._j0 = None
+                self._y0 = None
+                self._j1 = None
+                self._y1 = None
+
+        if _SCIPY_SPECIAL is not None:
+            try:
+                # Ensure required real-order functions are present/callable.
+                float(_SCIPY_SPECIAL.j0(0.0))
+                float(_SCIPY_SPECIAL.y0(1.0))
+                float(_SCIPY_SPECIAL.j1(0.0))
+                float(_SCIPY_SPECIAL.y1(1.0))
+                self._backend_name = "scipy-special"
+            except Exception:
+                self._backend_name = "series-fallback"
 
     @property
     def available(self) -> bool:
-        return self._lib is not None
+        return self._backend_name != "series-fallback"
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend_name
 
     def j0(self, x: float) -> float:
         if self._j0 is not None:
             return float(self._j0(float(x)))
+        if self._backend_name == "scipy-special" and _SCIPY_SPECIAL is not None:
+            return float(_SCIPY_SPECIAL.j0(float(x)))
         return _j0_fallback(x)
 
     def y0(self, x: float) -> float:
         if self._y0 is not None:
             return float(self._y0(float(x)))
+        if self._backend_name == "scipy-special" and _SCIPY_SPECIAL is not None:
+            return float(_SCIPY_SPECIAL.y0(float(x)))
         return _y0_fallback(x)
 
     def j1(self, x: float) -> float:
         if self._j1 is not None:
             return float(self._j1(float(x)))
+        if self._backend_name == "scipy-special" and _SCIPY_SPECIAL is not None:
+            return float(_SCIPY_SPECIAL.j1(float(x)))
         return _j1_fallback(x)
 
     def y1(self, x: float) -> float:
         if self._y1 is not None:
             return float(self._y1(float(x)))
+        if self._backend_name == "scipy-special" and _SCIPY_SPECIAL is not None:
+            return float(_SCIPY_SPECIAL.y1(float(x)))
         return _y1_fallback(x)
 
 
@@ -2393,7 +2420,7 @@ def solve_monostatic_rcs_2d(
             "frequency_count": len(frequencies),
             "elevation_count": len(elevations),
             "max_panels_limit": int(max(1, int(max_panels))),
-            "bessel_backend": "libm" if _BESSEL.available else "series-fallback",
+            "bessel_backend": _BESSEL.backend_name,
             "complex_hankel_backend": _complex_hankel_backend_name(),
             "junction_nodes": int(junction_stats.get("junction_nodes", 0)),
             "junction_constraints": int(junction_stats.get("junction_constraints", 0)),

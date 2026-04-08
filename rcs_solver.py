@@ -1287,56 +1287,218 @@ def _observation_samples(panel: Panel, order: int = 2) -> List[Tuple[np.ndarray,
     return out
 
 
-def _build_operator_matrices(panels: List[Panel], k0: float) -> Tuple[np.ndarray, np.ndarray]:
-    """Build legacy S and K' dense operators at one frequency."""
+def _build_bem_matrices(
+    panels: List[Panel],
+    k0: complex,
+    obs_normal_deriv: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Build S and K/K' dense BEM operator matrices.
 
-    n = len(panels)
-    s_mat = np.zeros((n, n), dtype=np.complex128)
-    kp_mat = np.zeros((n, n), dtype=np.complex128)
+    obs_normal_deriv=True  → K' uses observation-panel normal (legacy EFIE/MFIE).
+    obs_normal_deriv=False → K  uses source-panel normal (coupled dielectric).
 
-    for m, pm in enumerate(panels):
-        obs_samples = _observation_samples(pm, order=2)
-        for n_idx, pn in enumerate(panels):
-            if m == n_idx:
-                s_mat[m, n_idx] = _integrate_single_layer(pm.center, pn, k0, is_self=True)
-                kp_mat[m, n_idx] = 0.0 + 0.0j
-                continue
+    Far-field pairs (center-distance / panel-length >= 3): fully vectorised via
+    scipy.special.hankel2 accepting array inputs.  This converts O(N^2 * Q)
+    Python scalar calls into a single batched C/BLAS evaluation.
 
-            s_val = 0.0 + 0.0j
-            kp_val = 0.0 + 0.0j
-            for obs, w in obs_samples:
-                s_val += float(w) * _integrate_single_layer(obs, pn, k0, is_self=False)
-                kp_val += float(w) * _integrate_kprime(obs, pm.normal, pn, k0, is_self=False)
-            s_mat[m, n_idx] = s_val
-            kp_mat[m, n_idx] = kp_val
-
-    return s_mat, kp_mat
-
-
-def _build_operator_matrices_coupled(panels: List[Panel], k0: complex | float) -> Tuple[np.ndarray, np.ndarray]:
-    """Build coupled-formulation S and K dense operators at one medium k."""
-
+    Near-field pairs (the minority, O(N)): existing adaptive Gauss quadrature
+    with near-singular correction is preserved exactly.
+    """
     n = len(panels)
     s_mat = np.zeros((n, n), dtype=np.complex128)
     k_mat = np.zeros((n, n), dtype=np.complex128)
+    if n == 0:
+        return s_mat, k_mat
 
-    for m, pm in enumerate(panels):
-        obs_samples = _observation_samples(pm, order=2)
-        for n_idx, pn in enumerate(panels):
-            if m == n_idx:
-                s_mat[m, n_idx] = _integrate_single_layer(pm.center, pn, k0, is_self=True)
-                k_mat[m, n_idx] = 0.0 + 0.0j
+    centers = np.empty((n, 2), dtype=float)
+    normals = np.empty((n, 2), dtype=float)
+    p0s = np.empty((n, 2), dtype=float)
+    segs = np.empty((n, 2), dtype=float)
+    lengths = np.empty(n, dtype=float)
+    for i, p in enumerate(panels):
+        centers[i] = p.center
+        normals[i] = p.normal
+        p0s[i] = p.p0
+        segs[i] = p.p1 - p.p0
+        lengths[i] = p.length
+
+    # Diagonal self-terms
+    for m in range(n):
+        s_mat[m, m] = _single_layer_self_term(k0, lengths[m])
+    # k_mat diagonal remains zero (self-term of K/K' is 0)
+
+    diff_cc = centers[:, np.newaxis, :] - centers[np.newaxis, :, :]  # (N,N,2)
+    dist_cc = np.linalg.norm(diff_cc, axis=-1)                       # (N,N)
+    ratio_mat = dist_cc / np.maximum(lengths[np.newaxis, :], EPS)    # (N,N)
+
+    idx = np.arange(n)
+    off_diag = idx[:, None] != idx[None, :]
+    FAR_RATIO = 3.0
+    Q_FAR = 16
+    far_mask = off_diag & (ratio_mat >= FAR_RATIO)
+    near_mask = off_diag & (ratio_mat < FAR_RATIO)
+
+    # --- Vectorised far-field path ---
+    if np.any(far_mask) and _SCIPY_SPECIAL is not None:
+        qt_far, qw_far = _get_quadrature(Q_FAR)
+        # Source quadrature points: rq[src, q] = p0[src] + t_q * seg[src]
+        rq = p0s[:, np.newaxis, :] + qt_far[np.newaxis, :, np.newaxis] * segs[:, np.newaxis, :]  # (N,Q,2)
+
+        # Adaptive batch size to keep peak memory ≤ ~200 MB
+        bytes_per_entry = 16  # complex128
+        BATCH = max(8, min(128, int(2e8 / (n * Q_FAR * 2 * bytes_per_entry))))
+
+        for m0 in range(0, n, BATCH):
+            m1 = min(m0 + BATCH, n)
+            B = m1 - m0
+            far_b = far_mask[m0:m1, :]           # (B,N)
+            if not np.any(far_b):
                 continue
 
+            obs_c = centers[m0:m1, :]            # (B,2)
+            obs_n = normals[m0:m1, :]            # (B,2)
+
+            # diff[b,n,q] = obs_c[b] - rq[n,q], pointing from source quad-pt to obs
+            diff = obs_c[:, np.newaxis, np.newaxis, :] - rq[np.newaxis, :, :, :]  # (B,N,Q,2)
+            dist = np.linalg.norm(diff, axis=-1)  # (B,N,Q)
+            dist = np.maximum(dist, EPS)
+
+            kr_abs = float(abs(complex(k0)))
+            _k0_is_real = abs(complex(k0).imag) < 1e-10 * max(kr_abs, 1e-30)
+            if _k0_is_real:
+                # Fast path: real argument – j0/y0/j1/y1 are ~9× faster than hankel2
+                kr_real = (float(complex(k0).real) * dist).ravel()
+                kr_real = np.maximum(kr_real, 1e-12)
+                h0 = (_SCIPY_SPECIAL.j0(kr_real) - 1j * _SCIPY_SPECIAL.y0(kr_real)).reshape(B, n, Q_FAR)
+                h1 = (_SCIPY_SPECIAL.j1(kr_real) - 1j * _SCIPY_SPECIAL.y1(kr_real)).reshape(B, n, Q_FAR)
+            else:
+                # Lossy media: complex k – use hankel2
+                kr = (complex(k0) * dist).ravel()
+                h0 = np.asarray(_SCIPY_SPECIAL.hankel2(0, kr)).reshape(B, n, Q_FAR)
+                h1 = np.asarray(_SCIPY_SPECIAL.hankel2(1, kr)).reshape(B, n, Q_FAR)
+
+            G = 0.25j * h0                                                  # (B,N,Q)
+            S_b = lengths * np.einsum('q,bnq->bn', qw_far, G)              # (B,N)
+
+            if obs_normal_deriv:
+                # K'[b,n]: n_obs · (obs - src) / |obs - src|
+                proj = np.einsum('bi,bnqi->bnq', obs_n, diff) / dist
+                Ki = (-0.25j * complex(k0)) * h1 * proj
+            else:
+                # K[b,n]: n_src · (obs - src) / |obs - src|
+                proj = np.sum(normals[np.newaxis, :, np.newaxis, :] * diff, axis=-1) / dist
+                Ki = (0.25j * complex(k0)) * h1 * proj
+
+            K_b = lengths * np.einsum('q,bnq->bn', qw_far, Ki)             # (B,N)
+
+            s_mat[m0:m1, :] = np.where(far_b, S_b, s_mat[m0:m1, :])
+            k_mat[m0:m1, :] = np.where(far_b, K_b, k_mat[m0:m1, :])
+
+    # --- Near-field path ---
+    # When scipy is available: vectorize each (order, splits) tier in one batch call.
+    # When scipy is unavailable: fall back to scalar per-pair loop.
+    active_mask = off_diag if _SCIPY_SPECIAL is None else near_mask
+
+    if _SCIPY_SPECIAL is not None and np.any(active_mask):
+        # Pre-compute 2-pt Gauss observation samples for all panels
+        qt2, qw2 = _get_quadrature(2)
+        obs_pts_all = p0s[:, np.newaxis, :] + qt2[np.newaxis, :, np.newaxis] * segs[:, np.newaxis, :]  # (N,2,2)
+
+        _k0_is_real_nf = abs(complex(k0).imag) < 1e-10 * max(abs(complex(k0)), 1e-30)
+
+        # Tier boundaries match _near_singular_scheme thresholds
+        TIERS: List[Tuple[float, float, int, int]] = [
+            (0.0,  0.25, 64, 16),
+            (0.25, 0.60, 56, 10),
+            (0.60, 1.50, 40,  6),
+            (1.50, 3.00, 28,  3),
+        ]
+        for r_lo, r_hi, t_order, t_splits in TIERS:
+            tier_mask = active_mask & (ratio_mat >= r_lo) & (ratio_mat < r_hi)
+            if not np.any(tier_mask):
+                continue
+            tm, tn = np.where(tier_mask)
+
+            # Expanded Gauss nodes/weights for this tier on [0,1]
+            dt = 1.0 / t_splits
+            qt_t, qw_t = _get_quadrature(t_order)
+            t_eff_list: List[float] = []
+            w_eff_list: List[float] = []
+            for s_idx in range(t_splits):
+                t0_s = s_idx * dt
+                for tt, ww in zip(qt_t.tolist(), qw_t.tolist()):
+                    t_eff_list.append(t0_s + dt * tt)
+                    w_eff_list.append(dt * ww)
+            t_eff = np.asarray(t_eff_list, dtype=float)   # (Q_eff,)
+            w_eff = np.asarray(w_eff_list, dtype=float)   # (Q_eff,)
+            Q_eff = len(t_eff)
+            w2d = qw2[:, np.newaxis] * w_eff[np.newaxis, :]  # (2, Q_eff) combined weights
+
+            # Source quad pts: (N_tier, Q_eff, 2)
+            rq_t = p0s[tn, np.newaxis, :] + t_eff[np.newaxis, :, np.newaxis] * segs[tn, np.newaxis, :]
+
+            # Observation 2-pt samples: (N_tier, 2, 2)
+            obs_pts_t = obs_pts_all[tm]   # (N_tier, 2, 2)
+            obs_n_t = normals[tm]         # (N_tier, 2)
+
+            # diff[j, o, q, :] = obs_pts_t[j,o] - rq_t[j,q]
+            diff_t = obs_pts_t[:, :, np.newaxis, :] - rq_t[:, np.newaxis, :, :]  # (N_tier,2,Q_eff,2)
+            dist_t = np.maximum(np.linalg.norm(diff_t, axis=-1), EPS)            # (N_tier,2,Q_eff)
+
+            flat_sz = dist_t.size
+            if _k0_is_real_nf:
+                kr_f = np.maximum(float(complex(k0).real) * dist_t, 1e-12).ravel()
+                h0_f = (_SCIPY_SPECIAL.j0(kr_f) - 1j * _SCIPY_SPECIAL.y0(kr_f)).reshape(dist_t.shape)
+                h1_f = (_SCIPY_SPECIAL.j1(kr_f) - 1j * _SCIPY_SPECIAL.y1(kr_f)).reshape(dist_t.shape)
+            else:
+                kr_f = (complex(k0) * dist_t).ravel()
+                h0_f = np.asarray(_SCIPY_SPECIAL.hankel2(0, kr_f)).reshape(dist_t.shape)
+                h1_f = np.asarray(_SCIPY_SPECIAL.hankel2(1, kr_f)).reshape(dist_t.shape)
+
+            G_t = 0.25j * h0_f                                         # (N_tier,2,Q_eff)
+            S_tier = lengths[tn] * np.einsum('oq,joq->j', w2d, G_t)   # (N_tier,)
+
+            if obs_normal_deriv:
+                proj_t = np.einsum('ji,joqi->joq', obs_n_t, diff_t) / dist_t
+                Ki_t = (-0.25j * complex(k0)) * h1_f * proj_t
+            else:
+                src_n_t = normals[tn]                                   # (N_tier, 2)
+                proj_t = np.einsum('ji,joqi->joq', src_n_t, diff_t) / dist_t
+                Ki_t = (0.25j * complex(k0)) * h1_f * proj_t
+            K_tier = lengths[tn] * np.einsum('oq,joq->j', w2d, Ki_t)  # (N_tier,)
+
+            s_mat[tm, tn] = S_tier
+            k_mat[tm, tn] = K_tier
+    else:
+        # Scalar fallback loop (no scipy, or empty near-field set)
+        near_rows, near_cols = np.where(active_mask)
+        for m, n_idx in zip(near_rows.tolist(), near_cols.tolist()):
+            pm = panels[m]
+            pn = panels[n_idx]
+            obs_samples = _observation_samples(pm, order=2)
             s_val = 0.0 + 0.0j
             k_val = 0.0 + 0.0j
             for obs, w in obs_samples:
                 s_val += float(w) * _integrate_single_layer(obs, pn, k0, is_self=False)
-                k_val += float(w) * _integrate_k_source(obs, pn, k0, is_self=False)
+                if obs_normal_deriv:
+                    k_val += float(w) * _integrate_kprime(obs, pm.normal, pn, k0, is_self=False)
+                else:
+                    k_val += float(w) * _integrate_k_source(obs, pn, k0, is_self=False)
             s_mat[m, n_idx] = s_val
             k_mat[m, n_idx] = k_val
 
     return s_mat, k_mat
+
+
+def _build_operator_matrices(panels: List[Panel], k0: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Build legacy S and K' dense operators at one frequency."""
+    return _build_bem_matrices(panels, complex(k0), obs_normal_deriv=True)
+
+
+def _build_operator_matrices_coupled(panels: List[Panel], k0: complex | float) -> Tuple[np.ndarray, np.ndarray]:
+    """Build coupled-formulation S and K dense operators at one medium k."""
+    return _build_bem_matrices(panels, complex(k0), obs_normal_deriv=False)
 
 
 def _propagation_direction_from_user_angle(elev_deg: float) -> np.ndarray:
@@ -1355,20 +1517,13 @@ def _propagation_direction_from_user_angle(elev_deg: float) -> np.ndarray:
 
 def _incident_values(panels: List[Panel], k0: float, elev_deg: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     direction = _propagation_direction_from_user_angle(elev_deg)
-
-    n = len(panels)
-    u_inc = np.zeros(n, dtype=np.complex128)
-    du_dn = np.zeros(n, dtype=np.complex128)
-    cos_inc = np.zeros(n, dtype=float)
-
-    for i, p in enumerate(panels):
-        phase = float(np.dot(direction, p.center))
-        val = cmath.exp(-1j * k0 * phase)
-        u_inc[i] = val
-        dot_nd = float(np.dot(p.normal, direction))
-        du_dn[i] = -1j * k0 * dot_nd * val
-        cos_inc[i] = abs(dot_nd)
-
+    centers = np.array([p.center for p in panels], dtype=float)  # (N,2)
+    normals = np.array([p.normal for p in panels], dtype=float)  # (N,2)
+    phases = centers @ direction                                  # (N,)
+    u_inc = np.exp((-1j * k0) * phases)
+    dot_nd = normals @ direction                                  # (N,)
+    du_dn = (-1j * k0) * dot_nd * u_inc
+    cos_inc = np.abs(dot_nd)
     return u_inc, du_dn, cos_inc
 
 
@@ -1645,15 +1800,11 @@ def _backscatter_rcs(
     elev_deg: float,
 ) -> Tuple[float, complex]:
     """Convert solved legacy current to monostatic 2D RCS and complex amplitude."""
-
-    inc_dir = _propagation_direction_from_user_angle(elev_deg)
-    scatter_dir = -inc_dir
-
-    amp = 0.0 + 0.0j
-    for panel, cur in zip(panels, sigma):
-        phase = cmath.exp(1j * k0 * float(np.dot(scatter_dir, panel.center)))
-        amp += cur * panel.length * phase
-
+    scatter_dir = -_propagation_direction_from_user_angle(elev_deg)
+    centers = np.array([p.center for p in panels], dtype=float)
+    lengths = np.array([p.length for p in panels], dtype=float)
+    phases = np.exp((1j * k0) * (centers @ scatter_dir))
+    amp = complex(np.dot(sigma * lengths, phases))
     sigma_lin = (2.0 * math.pi / max(k0, EPS)) * (abs(amp) ** 2)
     if not math.isfinite(sigma_lin) or sigma_lin < EPS:
         sigma_lin = EPS
@@ -1662,13 +1813,9 @@ def _backscatter_rcs(
 
 def _incident_plane_wave(panels: List[Panel], k_air: float, elev_deg: float) -> np.ndarray:
     """Incident field trace sampled at panel centers for one elevation."""
-
     direction = _propagation_direction_from_user_angle(elev_deg)
-    out = np.zeros(len(panels), dtype=np.complex128)
-    for i, p in enumerate(panels):
-        phase = float(np.dot(direction, p.center))
-        out[i] = cmath.exp(-1j * k_air * phase)
-    return out
+    centers = np.array([p.center for p in panels], dtype=float)
+    return np.exp((-1j * k_air) * (centers @ direction))
 
 
 def _assemble_coupled_region_row(
